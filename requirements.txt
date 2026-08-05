@@ -1,2 +1,8 @@
 streamlit
 pandas
+openpyxl
+plotly
+requests
+beautifulsoup4
+tqdm
+google-genai

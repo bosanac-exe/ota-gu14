@@ -18,8 +18,8 @@ DEFAULT_PLAYER = "Ela Velic"
 LOWER_IS_BETTER = {"Rank", "Singles WTN"}
 PERCENT_METRICS = {"Singles W/L Career %", "Singles W/L-YTD %"}
 DISPLAY_COLUMNS = [
-    "Week Label", "Rank", "Year of Birth", "Player", "Points", "Tournaments",
-    "Province", "Club", "Singles WTN", "Career Matches", "Singles W/L-Career",
+    "Week Label", "Rank", "Points", "Tournaments",
+    "Singles WTN", "Career Matches", "Singles W/L-Career",
     "Singles W/L-YTD", "Singles W/L Career %", "Singles W/L-YTD %",
 ]
 LATEST_TRENDS_COLUMNS = ["Rank", "Points", "Tournaments", "Singles WTN", "Career Matches", "Singles W/L Career %", "Singles W/L-YTD %"]
@@ -295,15 +295,14 @@ def get_latest_provincial_rank(rankings: pd.DataFrame, selected_player: str):
 
 def build_player_history_display(player_df: pd.DataFrame) -> pd.DataFrame:
     chronological_df = player_df.sort_values("Week Sort").copy()
-    visible_cols = [c for c in DISPLAY_COLUMNS if c in chronological_df.columns]
+    excluded_cols = {"Province", "Club"}
+    visible_cols = [c for c in DISPLAY_COLUMNS if c in chronological_df.columns and c not in excluded_cols]
     display_df = chronological_df[visible_cols + ["Week Sort"]].copy()
     for metric in NUMERIC_TREND_COLUMNS:
         if metric not in chronological_df.columns or metric not in display_df.columns:
             continue
         previous_values = chronological_df[metric].shift(1)
         display_df[metric] = [format_value(metric, v) if i == 0 else value_with_week_trend(metric, previous_values.iloc[i], v) for i, v in enumerate(chronological_df[metric].tolist())]
-    if "Year of Birth" in display_df.columns:
-        display_df["Year of Birth"] = display_df["Year of Birth"].apply(lambda v: format_value("Year of Birth", v))
     display_df = display_df.sort_values("Week Sort", ascending=False).drop(columns=["Week Sort"])
     return display_df.rename(columns={"Week Label": "Week"}) if "Week Label" in display_df.columns else display_df
 
@@ -618,22 +617,62 @@ def main():
     render_sidebar_summary(rankings["Week Label"].nunique(), rankings["Player"].nunique(), len(rankings))
     player_df = rankings[rankings["Player"] == selected_player].sort_values("Week Sort")
     profile_url = get_latest_profile_url(player_df)
+    
+    latest_yob = "unavailable"
+    latest_province = "unavailable"
+    latest_club = "unavailable"
+    latest = player_df.tail(1)
+    if not latest.empty:
+        latest_row = latest.iloc[0]
+        yob_val = latest_row.get("Year of Birth")
+        if not pd.isna(yob_val):
+            latest_yob = format_value("Year of Birth", yob_val)
+        prov_val = latest_row.get("Province")
+        if not pd.isna(prov_val) and str(prov_val).strip() != "":
+            latest_province = str(prov_val).strip()
+        club_val = latest_row.get("Club")
+        if not pd.isna(club_val) and str(club_val).strip() != "":
+            latest_club = str(club_val).strip()
+
     if profile_url:
         safe_url = escape(profile_url, quote=True)
         safe_player = escape(selected_player)
-        st.markdown(f'<div style="font-size: 1.75rem; font-weight: 600; margin: 0.25rem 0 0.75rem 0; line-height: 1.25;"><a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="text-decoration: underline;">{safe_player}</a></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size: 1.75rem; font-weight: 600; margin: 0.25rem 0 0.1rem 0; line-height: 1.25;"><a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="text-decoration: underline;">{safe_player}</a></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size: 0.95rem; color: #6b7280; margin-bottom: 0.1rem;">Year of Birth: {latest_yob}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size: 0.95rem; color: #6b7280; margin-bottom: 0.1rem;">Province: {latest_province}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size: 0.95rem; color: #6b7280; margin-bottom: 0.75rem;">Club: {latest_club}</div>', unsafe_allow_html=True)
     else:
         st.subheader(selected_player, anchor=False)
-    latest = player_df.tail(1)
+        st.markdown(f'<div style="font-size: 0.95rem; color: #6b7280; margin-top: -1rem; margin-bottom: 0.1rem;">Year of Birth: {latest_yob}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size: 0.95rem; color: #6b7280; margin-bottom: 0.1rem;">Province: {latest_province}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size: 0.95rem; color: #6b7280; margin-bottom: 0.75rem;">Club: {latest_club}</div>', unsafe_allow_html=True)
+
     if not latest.empty:
         latest_row = latest.iloc[0]
         provincial_rank = get_latest_provincial_rank(rankings, selected_player)
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Latest rank", "unavailable" if pd.isna(latest_row.get("Rank")) else int(latest_row.get("Rank")))
-        k2.metric("Provincial rank", "unavailable" if pd.isna(provincial_rank) else int(provincial_rank))
-        k3.metric("Latest points", "unavailable" if pd.isna(latest_row.get("Points")) else f"{latest_row.get('Points'):,.3f}")
-        k4.metric("Latest WTN", "unavailable" if pd.isna(latest_row.get("Singles WTN")) else f"{latest_row.get('Singles WTN'):.1f}")
         
+        canadian_flag_html = '<img src="https://flagcdn.com/w20/ca.png" style="vertical-align: middle; margin-left: 6px;" alt="Canada Flag"/>'
+        wtn_logo_html = '<img src="https://worldtennisnumber.com/favicon-16x16.png" style="vertical-align: middle; margin-left: 6px;" alt="WTN Logo"/>'
+        
+        val_k1 = "unavailable" if pd.isna(latest_row.get("Rank")) else f"{int(latest_row.get('Rank'))}"
+        val_k2 = "unavailable" if pd.isna(provincial_rank) else f"{int(provincial_rank)}"
+        val_k3 = "unavailable" if pd.isna(latest_row.get("Points")) else f"{latest_row.get('Points'):,.3f}"
+        val_k4 = "unavailable" if pd.isna(latest_row.get("Singles WTN")) else f"{latest_row.get('Singles WTN'):.1f}"
+
+        metric_card_css = """
+        <div style="background-color: var(--secondary-background-color); padding: 14px 16px; border-radius: 0.5rem; border: 1px solid rgba(128, 128, 128, 0.2);">
+            <div style="font-size: 0.85rem; color: var(--text-color); opacity: 0.8; margin-bottom: 4px;">{label}</div>
+            <div style="font-size: 1.6rem; font-weight: 600; line-height: 1.2;">{value}</div>
+        </div>
+        """
+
+        k1.markdown(metric_card_css.format(label=f"Latest rank {canadian_flag_html}", value=val_k1), unsafe_allow_html=True)
+        k2.markdown(metric_card_css.format(label="Provincial rank", value=val_k2), unsafe_allow_html=True)
+        k3.markdown(metric_card_css.format(label="Latest points", value=val_k3), unsafe_allow_html=True)
+        k4.markdown(metric_card_css.format(label=f"Latest WTN {wtn_logo_html}", value=val_k4), unsafe_allow_html=True)
+        
+    st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
     tab_table, tab_charts, tab_ytd, tab_top_movers, tab_latest_trends, tab_top_100, tab_top_50, tab_top_20, tab_top_50_ontario, tab_ai = st.tabs([
         "Player history", "Player Charts", "YTD Player trends", "Top movers", "Latest Week Trends", "Top 100", "Top 50", "Top 20", "Top 50 Ontario", "AI Analysis"
     ])

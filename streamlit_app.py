@@ -269,13 +269,6 @@ def table_auto_height(row_count: int, row_height: int = 35, header_height: int =
     return int(header_height + padding + max(row_count, 1) * row_height)
 
 
-def format_year_of_birth_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    display_df = df.copy()
-    if "Year of Birth" in display_df.columns:
-        display_df["Year of Birth"] = display_df["Year of Birth"].apply(lambda value: format_value("Year of Birth", value))
-    return display_df
-
-
 def get_latest_provincial_rank(rankings: pd.DataFrame, selected_player: str):
     latest_sort = rankings["Week Sort"].max()
     latest_df = rankings[rankings["Week Sort"] == latest_sort].copy()
@@ -530,6 +523,62 @@ def render_top_50_ontario_tab(rankings: pd.DataFrame):
     render_top_n_analytics(top50_ontario_df, latest_label, 50, show_province_chart=False, clubs_include_province=False, include_players_table=True, players_table_title="Top 50 Ontario players by rank", players_table_height=None, caption_prefix="Top 50 Ontario analysis", include_ontario_rank=True)
 
 
+def render_multi_player_download_tab(rankings: pd.DataFrame):
+    st.subheader("Multi-Player Raw Data Download", anchor=False)
+    st.caption("Paste player names below (each name on a new line) to retrieve all available data across all weeks and download it as a CSV.")
+
+    names_input = st.text_area(
+        "Player Names",
+        placeholder="Ela Velic\nPlayer Two\nPlayer Three",
+        height=150
+    )
+
+    if st.button("Retrieve Data", type="primary"):
+        if not names_input.strip():
+            st.warning("Please enter at least one player name.")
+            return
+
+        target_players_raw = [name.strip() for name in names_input.splitlines() if name.strip()]
+        
+        rankings = rankings.copy()
+        rankings["Player_Lower"] = rankings["Player"].str.lower()
+        target_players_lower = [name.lower() for name in target_players_raw]
+
+        filtered_df = rankings[rankings["Player_Lower"].isin(target_players_lower)].drop(columns=["Player_Lower"])
+
+        if filtered_df.empty:
+            st.error("No data found for any of the specified player names. Please check the spelling and try again.")
+            return
+
+        cols_to_drop = ["Profile", "Province", "Club", "Profile URL", "Week Number", "Ranking Year", "Week Sort"]
+        filtered_df = filtered_df.drop(columns=[c for c in cols_to_drop if c in filtered_df.columns])
+
+        sort_cols = [c for c in ["Player", "Week Label"] if c in filtered_df.columns]
+        if sort_cols:
+            filtered_df = filtered_df.sort_values(sort_cols)
+
+        st.success(f"Found {len(filtered_df):,} total records across {filtered_df['Player'].nunique()} player(s).")
+        # Display clean dataframe on screen without formula wrappers
+        st.dataframe(filtered_df, width="stretch", hide_index=True)
+
+        # Apply Excel text-force formulas only for the CSV download payload
+        download_df = filtered_df.copy()
+        wl_columns = ["Singles W/L-Career", "Singles W/L-YTD"]
+        for col in wl_columns:
+            if col in download_df.columns:
+                download_df[col] = download_df[col].apply(
+                    lambda x: f'="{x}"' if pd.notna(x) and str(x).strip() != "" else x
+                )
+
+        csv_data = download_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download Data as CSV",
+            data=csv_data,
+            file_name="multi_player_raw_data.csv",
+            mime="text/csv",
+        )
+
+
 def render_ai_analysis_tab(selected_player: str, player_df: pd.DataFrame, rankings: pd.DataFrame):
     st.subheader(f"AI Analysis for {selected_player}", anchor=False)
     st.caption("Summarizing the player's history, charts, and YTD trends using Google Gemini.")
@@ -673,8 +722,8 @@ def main():
         k4.markdown(metric_card_css.format(label=f"Latest WTN {wtn_logo_html}", value=val_k4), unsafe_allow_html=True)
         
     st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
-    tab_table, tab_charts, tab_ytd, tab_top_movers, tab_latest_trends, tab_top_100, tab_top_50, tab_top_20, tab_top_50_ontario, tab_ai = st.tabs([
-        "Player history", "Player Charts", "YTD Player trends", "Top movers", "Latest Week Trends", "Top 100", "Top 50", "Top 20", "Top 50 Ontario", "AI Analysis"
+    tab_table, tab_charts, tab_ytd, tab_top_movers, tab_latest_trends, tab_top_100, tab_top_50, tab_top_20, tab_top_50_ontario, tab_ai, tab_multi_download = st.tabs([
+        "Player history", "Player Charts", "YTD Player trends", "Top movers", "Latest Week Trends", "Top 100", "Top 50", "Top 20", "Top 50 Ontario", "AI Analysis", "Multi-Player Download"
     ])
     with tab_table:
         st.caption("Most recent week appears first. Numeric metric cells include week-to-week trend arrows. For Rank and Singles WTN, lower values are treated as better.")
@@ -727,6 +776,8 @@ def main():
         render_top_50_ontario_tab(rankings)
     with tab_ai:
         render_ai_analysis_tab(selected_player, player_df, rankings)
+    with tab_multi_download:
+        render_multi_player_download_tab(rankings)
 
 
 if __name__ == "__main__":

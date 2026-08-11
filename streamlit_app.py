@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Tuple
 import subprocess
 import zoneinfo
+import io
 
 import streamlit as st
 import pandas as pd
@@ -525,7 +526,7 @@ def render_top_50_ontario_tab(rankings: pd.DataFrame):
 
 def render_multi_player_download_tab(rankings: pd.DataFrame):
     st.subheader("Multi-Player Raw Data Download", anchor=False)
-    st.caption("Paste player names below (each name on a new line) to retrieve all available data across all weeks and download it as a CSV.")
+    st.caption("Paste player names below (each name on a new line) to retrieve all available data across all weeks and download it as an Excel spreadsheet.")
 
     names_input = st.text_area(
         "Player Names",
@@ -558,24 +559,19 @@ def render_multi_player_download_tab(rankings: pd.DataFrame):
             filtered_df = filtered_df.sort_values(sort_cols)
 
         st.success(f"Found {len(filtered_df):,} total records across {filtered_df['Player'].nunique()} player(s).")
-        # Display clean dataframe on screen without formula wrappers
         st.dataframe(filtered_df, width="stretch", hide_index=True)
 
-        # Apply Excel text-force formulas only for the CSV download payload
-        download_df = filtered_df.copy()
-        wl_columns = ["Singles W/L-Career", "Singles W/L-YTD"]
-        for col in wl_columns:
-            if col in download_df.columns:
-                download_df[col] = download_df[col].apply(
-                    lambda x: f'="{x}"' if pd.notna(x) and str(x).strip() != "" else x
-                )
+        # Export as an explicit binary Excel (.xlsx) file stream
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            filtered_df.to_excel(writer, index=False, sheet_name="Player Data")
+        excel_binary_data = output.getvalue()
 
-        csv_data = download_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="Download Data as CSV",
-            data=csv_data,
-            file_name="multi_player_raw_data.csv",
-            mime="text/csv",
+            label="Download Data as Excel (.xlsx)",
+            data=excel_binary_data,
+            file_name="multi_player_raw_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
 

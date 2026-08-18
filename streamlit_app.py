@@ -6,10 +6,12 @@ from typing import List, Tuple
 import subprocess
 import zoneinfo
 import io
+import math
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from openpyxl import load_workbook
 from google import genai
 
@@ -25,10 +27,28 @@ DISPLAY_COLUMNS = [
 ]
 LATEST_TRENDS_COLUMNS = ["Rank", "Points", "Tournaments", "Singles WTN", "Career Matches", "Singles W/L Career %", "Singles W/L-YTD %"]
 NUMERIC_TREND_COLUMNS = LATEST_TRENDS_COLUMNS.copy()
-DEFAULT_CHART_METRICS = ["Rank", "Points", "Singles WTN"]
 OPTIONAL_CHART_METRICS = ["Rank", "Points", "Singles WTN", "Tournaments", "Career Matches", "Singles W/L Career %", "Singles W/L-YTD %"]
 YTD_TREND_METRICS = LATEST_TRENDS_COLUMNS.copy()
 TOP_MOVER_METRIC_COLUMNS = ["Points", "Singles WTN", "Tournaments", "Career Matches", "Singles W/L-YTD %"]
+
+PROVINCE_MAPPING = {
+    "Tennis Québec": "Québec",
+    "Ontario Tennis Association": "Ontario",
+    "British Columbia": "British Columbia",
+    "Tennis Alberta": "Alberta",
+    "Tennis Saskatchewan": "Saskatchewan",
+    "Tennis New Brunswick": "New Brunswick",
+    "Tennis Nova Scotia": "Nova Scotia",
+    "Tennis Manitoba": "Manitoba",
+    "Tennis Prince Edward Island": "Prince Edward Island",
+    "Tennis Newfoundland & Labrador": "Newfoundland & Labrador"
+}
+
+def normalize_province_name(value):
+    if pd.isna(value):
+        return value
+    val_str = str(value).strip()
+    return PROVINCE_MAPPING.get(val_str, val_str)
 
 
 def strip_leading_zero(value: str) -> str:
@@ -155,20 +175,33 @@ def get_latest_profile_url(player_df: pd.DataFrame):
     return None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def load_rankings(excel_file: Path) -> pd.DataFrame:
-    all_sheets = pd.read_excel(excel_file, sheet_name=None, engine="openpyxl")
-    workbook = load_workbook(excel_file, data_only=False, read_only=False)
-    frames: List[pd.DataFrame] = []
-    for sheet_name, sheet_df in all_sheets.items():
-        sheet_key = str(sheet_name).strip().lower()
-        if sheet_key == "trends" or not WEEK_SHEET_RE.match(str(sheet_name).strip()):
-            continue
+    workbook = load_workbook(excel_file, data_only=True, read_only=True)
+    sheet_names = [name for name in workbook.sheetnames if WEEK_SHEET_RE.match(str(name).strip())]
+    workbook.close()
+
+    @st.cache_data(show_spinner=False)
+    def load_single_sheet(file_path: str, sheet_name: str) -> pd.DataFrame:
+        wb_full = load_workbook(file_path, data_only=False, read_only=False)
+        ws = wb_full[sheet_name]
+        sheet_df = pd.DataFrame(ws.values)
+        if sheet_df.empty:
+            wb_full.close()
+            return pd.DataFrame()
+        
+        sheet_df.columns = sheet_df.iloc[0]
+        sheet_df = sheet_df.iloc[1:].reset_index(drop=True)
+        
         week_number, ranking_year, week_label = parse_week_sheet_name(sheet_name)
         df = clean_headers(sheet_df)
         if "Player" not in df.columns:
-            continue
-        df["Profile URL"] = extract_profile_urls(workbook[sheet_name], df) if sheet_name in workbook.sheetnames else pd.NA
+            wb_full.close()
+            return pd.DataFrame()
+            
+        df["Profile URL"] = extract_profile_urls(ws, df)
+        wb_full.close()
+        
         df = df.dropna(how="all")
         df = df[df["Player"].notna()]
         df["Player"] = df["Player"].astype(str).str.strip()
@@ -177,8 +210,16 @@ def load_rankings(excel_file: Path) -> pd.DataFrame:
         df["Ranking Year"] = ranking_year
         df["Week Label"] = week_label
         df["Week Sort"] = ranking_year * 100 + week_number
-        frames.append(df)
-    workbook.close()
+        if "Province" in df.columns:
+            df["Province"] = df["Province"].apply(normalize_province_name)
+        return df
+
+    frames: List[pd.DataFrame] = []
+    for sheet_name in sheet_names:
+        df_sheet = load_single_sheet(str(excel_file), sheet_name)
+        if not df_sheet.empty:
+            frames.append(df_sheet)
+
     if not frames:
         raise ValueError("No weekly sheets found. Expected sheet names like 'Week 27-2026'.")
     return coerce_numeric_columns(pd.concat(frames, ignore_index=True, sort=False)).sort_values(["Week Sort", "Rank", "Player"], na_position="last")
@@ -287,9 +328,48 @@ def get_latest_provincial_rank(rankings: pd.DataFrame, selected_player: str):
     return int(matches.index[0] + 1)
 
 
+def render_wtn_donut_chart(wtn_value):
+    if pd.isna(wtn_value):
+        return "unavailable"
+    
+    val = float(wtn_value)
+    fraction = max(0.0, min(1.0, (40.0 - val) / 39.0))
+    
+    filled_deg = fraction * 270
+    rem_deg = 270 - filled_deg
+    gap_deg = 90
+
+    fig = go.Figure(go.Pie(
+        values=[filled_deg, rem_deg, gap_deg],
+        hole=0.75,
+        direction="clockwise",
+        rotation=225,
+        sort=False,
+        marker=dict(colors=["#1f77b4", "#e5e7eb", "rgba(0,0,0,0)"]),
+        textinfo="none",
+        hoverinfo="none"
+    ))
+    
+    fig.update_layout(
+        showlegend=False,
+        autosize=True,
+        margin=dict(l=20, r=20, t=20, b=20),
+        annotations=[
+            dict(
+                text=f"<span style='font-family: inherit; font-size: 1.7rem; font-weight: 600; color: #111827;'>{val:.1f}</span>",
+                x=0.5, y=0.5,
+                showarrow=False,
+                xref="paper",
+                yref="paper"
+            )
+        ]
+    )
+    return fig
+
+
 def build_player_history_display(player_df: pd.DataFrame) -> pd.DataFrame:
     chronological_df = player_df.sort_values("Week Sort").copy()
-    excluded_cols = {"Province", "Club"}
+    excluded_cols = {"Club"}
     visible_cols = [c for c in DISPLAY_COLUMNS if c in chronological_df.columns and c not in excluded_cols]
     display_df = chronological_df[visible_cols + ["Week Sort"]].copy()
     for metric in NUMERIC_TREND_COLUMNS:
@@ -389,21 +469,21 @@ def style_distribution_chart(fig):
     return fig
 
 
-def chart_metric(player_df: pd.DataFrame, metric: str):
-    chart_df = player_df[["Week Label", "Week Sort", metric]].dropna().sort_values("Week Sort")
-    if chart_df.empty:
-        st.info(f"No numeric data available for {metric} for this player.")
+def chart_multi_player_metric(rankings: pd.DataFrame, players: List[str], metric: str):
+    if not players:
+        st.info("Please select at least one player to chart.")
         return
-    chart_df = chart_df.copy()
-    chart_df["Data Label"] = chart_df[metric].apply(lambda value: format_value(metric, value))
-    fig = px.line(chart_df, x="Week Label", y=metric, text="Data Label", markers=True, title=f"{metric} by week", labels={"Week Label": "Week", metric: metric})
-    fig.update_traces(textposition="top center", textfont_size=12)
-    fig.update_layout(xaxis_title="Week", yaxis_title=metric, hovermode="x unified")
+    chart_df = rankings[rankings["Player"].isin(players)][["Week Label", "Week Sort", "Player", metric]].dropna(subset=[metric]).sort_values("Week Sort")
+    if chart_df.empty:
+        st.info(f"No numeric data available for {metric} for the selected players.")
+        return
+    fig = px.line(chart_df, x="Week Label", y=metric, color="Player", markers=True, title=f"{metric} Comparison by Week", labels={"Week Label": "Week", metric: metric})
+    fig.update_layout(xaxis_title="Week", yaxis_title=metric, hovermode="x unified", title_x=0.5)
     if metric in LOWER_IS_BETTER:
         fig.update_yaxes(autorange="reversed")
     if "%" in metric:
         fig.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def format_top_players_table(source_df: pd.DataFrame, include_ontario_rank: bool = False) -> pd.DataFrame:
@@ -426,7 +506,7 @@ def format_top_players_table(source_df: pd.DataFrame, include_ontario_rank: bool
 def render_top_players_table(source_df: pd.DataFrame, title: str, height: int | None, include_ontario_rank: bool = False):
     st.subheader(title, anchor=False)
     display_df = format_top_players_table(source_df, include_ontario_rank=include_ontario_rank)
-    st.dataframe(display_df, width="stretch", height=height or table_auto_height(len(display_df)), hide_index=True)
+    st.dataframe(display_df, use_container_width=True, height=height or table_auto_height(len(display_df)), hide_index=True)
 
 
 def centered_number_table(df: pd.DataFrame):
@@ -456,22 +536,22 @@ def render_top_n_analytics(topn_df: pd.DataFrame, latest_label: str, n: int, *, 
         with pie_col1:
             fig_province = px.pie(province_counts, names="Province", values="Count", title=f"Top {n} by Province")
             fig_province.update_layout(title_x=0.5)
-            st.plotly_chart(fig_province, width="stretch")
+            st.plotly_chart(fig_province, use_container_width=True)
         with pie_col2:
             fig_yob = px.pie(yob_counts, names="Year of Birth", values="Count", title=f"Top {n} by Year of Birth")
             fig_yob.update_layout(title_x=0.5)
-            st.plotly_chart(fig_yob, width="stretch")
+            st.plotly_chart(fig_yob, use_container_width=True)
     else:
         row_col1, row_col2 = st.columns(2)
         with row_col1:
             fig_yob = px.pie(yob_counts, names="Year of Birth", values="Count", title=f"Top {n} by Year of Birth")
             fig_yob.update_layout(title_x=0.5)
-            st.plotly_chart(fig_yob, width="stretch")
+            st.plotly_chart(fig_yob, use_container_width=True)
         with row_col2:
             table_left, table_mid, table_right = st.columns([1, 8, 1])
             with table_mid:
                 st.subheader(f"Top 10 clubs by number of Top {n} players", anchor=False)
-                st.dataframe(centered_number_table(club_counts), width="content", hide_index=True)
+                st.dataframe(centered_number_table(club_counts), use_container_width=True, hide_index=True)
         st.markdown("<div style='height: 2.25rem;'></div>", unsafe_allow_html=True)
 
     avg_wtn = topn_df["Singles WTN"].dropna().mean() if "Singles WTN" in topn_df.columns else pd.NA
@@ -490,7 +570,7 @@ def render_top_n_analytics(topn_df: pd.DataFrame, latest_label: str, n: int, *, 
             fig_wtn = px.histogram(wtn_data, x="Singles WTN", title="WTN Distribution", labels={"Singles WTN": "Singles WTN"})
             fig_wtn.update_traces(xbins=dict(size=0.5))
             fig_wtn.update_layout(title_x=0.5, yaxis_title="Number of players")
-            st.plotly_chart(style_distribution_chart(fig_wtn), width="stretch")
+            st.plotly_chart(style_distribution_chart(fig_wtn), use_container_width=True)
     with hist_col2:
         match_data = topn_df[["Career Matches"]].dropna() if "Career Matches" in topn_df.columns else pd.DataFrame(columns=["Career Matches"])
         if match_data.empty:
@@ -499,10 +579,10 @@ def render_top_n_analytics(topn_df: pd.DataFrame, latest_label: str, n: int, *, 
             fig_matches = px.histogram(match_data, x="Career Matches", title="Career Matches Distribution", labels={"Career Matches": "Career Matches"})
             fig_matches.update_traces(xbins=dict(size=25))
             fig_matches.update_layout(title_x=0.5, yaxis_title="Number of players")
-            st.plotly_chart(style_distribution_chart(fig_matches), width="stretch")
+            st.plotly_chart(style_distribution_chart(fig_matches), use_container_width=True)
     if show_province_chart:
         st.subheader(f"Top 10 clubs by number of Top {n} players", anchor=False)
-        st.dataframe(centered_number_table(club_counts), width="content", hide_index=True)
+        st.dataframe(centered_number_table(club_counts), use_container_width=True, hide_index=True)
     if include_players_table:
         render_top_players_table(topn_df, players_table_title or f"Top {n} players by rank", players_table_height, include_ontario_rank=include_ontario_rank)
 
@@ -516,17 +596,17 @@ def render_top_50_ontario_tab(rankings: pd.DataFrame):
     latest_sort = rankings["Week Sort"].max()
     latest_label = rankings.loc[rankings["Week Sort"] == latest_sort, "Week Label"].iloc[0]
     latest_df = rankings[rankings["Week Sort"] == latest_sort].copy()
-    ontario_df = latest_df[latest_df["Province"].astype(str).str.strip().eq("Ontario Tennis Association")]
+    ontario_df = latest_df[latest_df["Province"].astype(str).str.strip().eq("Ontario")]
     top50_ontario_df = ontario_df.sort_values("Rank", na_position="last").head(50)
     if top50_ontario_df.empty:
-        st.info("No Ontario Tennis Association players were found in the latest week's data.")
+        st.info("No Ontario players were found in the latest week's data.")
         return
     render_top_n_analytics(top50_ontario_df, latest_label, 50, show_province_chart=False, clubs_include_province=False, include_players_table=True, players_table_title="Top 50 Ontario players by rank", players_table_height=None, caption_prefix="Top 50 Ontario analysis", include_ontario_rank=True)
 
 
 def render_multi_player_download_tab(rankings: pd.DataFrame):
     st.subheader("Multi-Player Raw Data Download", anchor=False)
-    st.caption("Paste player names below (each name on a new line) to retrieve all available data across all weeks and download it as an Excel spreadsheet.")
+    st.caption("Paste player names below (each name on a new line) to retrieve their data from the most recently available week and download it as an Excel spreadsheet.")
 
     names_input = st.text_area(
         "Player Names",
@@ -545,23 +625,25 @@ def render_multi_player_download_tab(rankings: pd.DataFrame):
         rankings["Player_Lower"] = rankings["Player"].str.lower()
         target_players_lower = [name.lower() for name in target_players_raw]
 
-        filtered_df = rankings[rankings["Player_Lower"].isin(target_players_lower)].drop(columns=["Player_Lower"])
+        filtered_df = rankings[rankings["Player_Lower"].isin(target_players_lower)].copy()
 
         if filtered_df.empty:
             st.error("No data found for any of the specified player names. Please check the spelling and try again.")
             return
 
-        cols_to_drop = ["Profile", "Province", "Club", "Profile URL", "Week Number", "Ranking Year", "Week Sort"]
+        idx_latest = filtered_df.groupby("Player_Lower")["Week Sort"].idxmax()
+        filtered_df = filtered_df.loc[idx_latest].drop(columns=["Player_Lower"])
+
+        cols_to_drop = ["Profile", "Profile URL", "Week Number", "Ranking Year", "Week Sort"]
         filtered_df = filtered_df.drop(columns=[c for c in cols_to_drop if c in filtered_df.columns])
 
         sort_cols = [c for c in ["Player", "Week Label"] if c in filtered_df.columns]
         if sort_cols:
             filtered_df = filtered_df.sort_values(sort_cols)
 
-        st.success(f"Found {len(filtered_df):,} total records across {filtered_df['Player'].nunique()} player(s).")
-        st.dataframe(filtered_df, width="stretch", hide_index=True)
+        st.success(f"Retrieved the most recent week's record for {filtered_df['Player'].nunique()} player(s).")
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
 
-        # Export as an explicit binary Excel (.xlsx) file stream
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             filtered_df.to_excel(writer, index=False, sheet_name="Player Data")
@@ -570,7 +652,7 @@ def render_multi_player_download_tab(rankings: pd.DataFrame):
         st.download_button(
             label="Download Data as Excel (.xlsx)",
             data=excel_binary_data,
-            file_name="multi_player_raw_data.xlsx",
+            file_name="multi_player_latest_data.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -615,7 +697,7 @@ def render_ai_analysis_tab(selected_player: str, player_df: pd.DataFrame, rankin
             try:
                 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
                 response = client.models.generate_content(
-                    model="gemini-3.6-flash",
+                    model="gemini-2.5-flash",
                     contents=prompt,
                 )
                 st.markdown(response.text)
@@ -641,6 +723,23 @@ def render_sidebar_summary(weeks_loaded: int, players_found: int, ranking_rows: 
             <div class="sidebar-summary-row"><span>Total Rows of Data</span><span class="sidebar-summary-value">{ranking_rows:,}</span></div>
         </div>
         """, unsafe_allow_html=True)
+
+
+def parse_win_loss_ytd(val):
+    if pd.isna(val):
+        return None, None
+    s = str(val).strip()
+    if not s or s.lower() in {"unavailable", "nan", "none"}:
+        return None, None
+    parts = s.split("/")
+    if len(parts) != 2:
+        return None, None
+    try:
+        w = int(float(parts[0].strip()))
+        l = int(float(parts[1].strip()))
+        return w, l
+    except ValueError:
+        return None, None
 
 
 def main():
@@ -703,19 +802,53 @@ def main():
         val_k1 = "unavailable" if pd.isna(latest_row.get("Rank")) else f"{int(latest_row.get('Rank'))}"
         val_k2 = "unavailable" if pd.isna(provincial_rank) else f"{int(provincial_rank)}"
         val_k3 = "unavailable" if pd.isna(latest_row.get("Points")) else f"{latest_row.get('Points'):,.3f}"
-        val_k4 = "unavailable" if pd.isna(latest_row.get("Singles WTN")) else f"{latest_row.get('Singles WTN'):.1f}"
+        
+        wtn_val = latest_row.get("Singles WTN")
 
         metric_card_css = """
-        <div style="background-color: var(--secondary-background-color); padding: 14px 16px; border-radius: 0.5rem; border: 1px solid rgba(128, 128, 128, 0.2);">
-            <div style="font-size: 0.85rem; color: var(--text-color); opacity: 0.8; margin-bottom: 4px;">{label}</div>
-            <div style="font-size: 1.6rem; font-weight: 600; line-height: 1.2;">{value}</div>
+        <div style="padding: 14px 16px; height: 100%; display: flex; flex-direction: column; align-items: center; text-align: center;">
+            <div style="font-size: 0.95rem; font-weight: 700; color: #111827; margin-bottom: 6px; width: 100%; text-align: center;">{label}</div>
+            <div style="font-size: 1.7rem; font-weight: 600; line-height: 1.2; width: 100%; text-align: center;">{value}</div>
         </div>
         """
 
-        k1.markdown(metric_card_css.format(label=f"Latest rank {canadian_flag_html}", value=val_k1), unsafe_allow_html=True)
+        with k1:
+            st.markdown(metric_card_css.format(label=f"Latest rank {canadian_flag_html}", value=val_k1), unsafe_allow_html=True)
+            
+            wl_raw = latest_row.get("Singles W/L-YTD")
+            w_val, l_val = parse_win_loss_ytd(wl_raw)
+            if w_val is not None and l_val is not None:
+                total_matches = w_val + l_val
+                if total_matches > 0:
+                    win_pct = (w_val / total_matches) * 100
+                    loss_pct = (l_val / total_matches) * 100
+                else:
+                    win_pct, loss_pct = 50.0, 50.0
+                wl_display_str = f"{w_val}/{l_val}"
+                wl_bar_html = f'<div style="display: flex; width: 120px; height: 6px; background-color: #e5e7eb; border-radius: 3px; overflow: hidden; margin: 6px auto 0 auto;"><div style="width: {win_pct}%; background-color: #22c55e;" title="Wins: {w_val} ({win_pct:.1f}%)"></div><div style="width: {loss_pct}%; background-color: #ef4444;" title="Losses: {l_val} ({loss_pct:.1f}%)"></div></div>'
+            else:
+                wl_display_str = "unavailable"
+                wl_bar_html = ""
+
+            st.markdown(f'<div style="padding: 14px 16px; height: 100%; display: flex; flex-direction: column; align-items: center; text-align: center;"><div style="font-size: 0.95rem; font-weight: 700; color: #111827; margin-bottom: 6px; width: 100%; text-align: center;">Win-Loss (YTD)</div><div style="font-size: 1.7rem; font-weight: 600; line-height: 1.2; width: 100%; text-align: center;">{wl_display_str}</div>{wl_bar_html}</div>', unsafe_allow_html=True)
+
         k2.markdown(metric_card_css.format(label="Provincial rank", value=val_k2), unsafe_allow_html=True)
         k3.markdown(metric_card_css.format(label="Latest points", value=val_k3), unsafe_allow_html=True)
-        k4.markdown(metric_card_css.format(label=f"Latest WTN {wtn_logo_html}", value=val_k4), unsafe_allow_html=True)
+        
+        with k4:
+            st.markdown(f"""
+            <div style="padding: 14px 16px 2px 16px; display: flex; flex-direction: column; align-items: center; text-align: center; width: 100%;">
+                <div style="font-size: 0.95rem; font-weight: 700; color: #111827; margin-bottom: 0px; width: 100%; display: flex; align-items: center; justify-content: center;">
+                    Latest WTN {wtn_logo_html}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            if pd.isna(wtn_val):
+                st.markdown('<div style="font-size: 1.7rem; font-weight: 600; line-height: 1.2; width: 100%; text-align: center; padding-bottom: 14px;">unavailable</div>', unsafe_allow_html=True)
+            else:
+                fig = render_wtn_donut_chart(wtn_val)
+                fig.update_layout(margin=dict(l=10, r=10, t=0, b=10), height=130)
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="latest_wtn_donut")
         
     st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
     tab_table, tab_charts, tab_ytd, tab_top_movers, tab_latest_trends, tab_top_100, tab_top_50, tab_top_20, tab_top_50_ontario, tab_ai, tab_multi_download = st.tabs([
@@ -723,13 +856,14 @@ def main():
     ])
     with tab_table:
         st.caption("Most recent week appears first. Numeric metric cells include week-to-week trend arrows. For Rank and Singles WTN, lower values are treated as better.")
-        player_history_display = build_player_history_display(player_df)
-        st.dataframe(style_trend_table(player_history_display, NUMERIC_TREND_COLUMNS), width="stretch", hide_index=True)
+        display_df = build_player_history_display(player_df)
+        st.dataframe(style_trend_table(display_df, NUMERIC_TREND_COLUMNS), use_container_width=True, height=table_auto_height(len(display_df)), hide_index=True)
     with tab_charts:
+        st.subheader("Player Comparison Charts", anchor=False)
         available_metrics = [m for m in OPTIONAL_CHART_METRICS if m in rankings.columns]
-        selected_metrics = st.multiselect("Metrics to chart", available_metrics, default=[m for m in DEFAULT_CHART_METRICS if m in available_metrics])
-        for metric in selected_metrics:
-            chart_metric(player_df, metric)
+        chart_players = st.multiselect("Select players to compare", players, default=[selected_player])
+        for metric in available_metrics:
+            chart_multi_player_metric(rankings, chart_players, metric)
     with tab_ytd:
         st.markdown("Compares the selected player's numeric metrics between the oldest and most recent weekly sheets in the workbook. For Rank and Singles WTN, lower values are treated as better.")
         try:
@@ -741,7 +875,7 @@ def main():
                 cols = st.columns(3)
                 for col, (_, row) in zip(cols, card_df.iloc[i : i + 3].iterrows()):
                     col.metric(row["Metric"], row[f"Latest ({latest_label})"], delta=row["Metric card delta"], delta_color="normal")
-            st.dataframe(trend_df.drop(columns=["Metric card delta"]), width="content", hide_index=True)
+            st.dataframe(trend_df.drop(columns=["Metric card delta"]), use_container_width=False, hide_index=True)
         except ValueError as exc:
             st.warning(str(exc))
             st.info("Tip: this tab needs the selected player to exist in both the oldest and most recent weekly sheets.")
@@ -750,16 +884,16 @@ def main():
             moved_up, moved_down, previous_label, latest_label = build_top_movers(rankings)
             st.caption(f"Ranking movement comparison: {previous_label} → {latest_label}.")
             st.subheader("Top 10 ranking movers up", anchor=False)
-            st.dataframe(style_trend_table(moved_up, ["Rank Trend"] + TOP_MOVER_METRIC_COLUMNS), width="stretch", hide_index=True)
+            st.dataframe(style_trend_table(moved_up, ["Rank Trend"] + TOP_MOVER_METRIC_COLUMNS), use_container_width=True, hide_index=True)
             st.subheader("Top 10 ranking movers down", anchor=False)
-            st.dataframe(style_trend_table(moved_down, ["Rank Trend"] + TOP_MOVER_METRIC_COLUMNS), width="stretch", hide_index=True)
+            st.dataframe(style_trend_table(moved_down, ["Rank Trend"] + TOP_MOVER_METRIC_COLUMNS), use_container_width=True, hide_index=True)
         except ValueError as exc:
             st.warning(str(exc))
     with tab_latest_trends:
         try:
             latest_trends_df, previous_label, latest_label = build_latest_week_trends(rankings)
             st.caption(f"Comparison: {previous_label} → {latest_label}. Only players listed in {latest_label} are included.")
-            st.dataframe(style_trend_table(latest_trends_df, LATEST_TRENDS_COLUMNS), width="stretch", height=520, hide_index=True)
+            st.dataframe(style_trend_table(latest_trends_df, LATEST_TRENDS_COLUMNS), use_container_width=True, height=520, hide_index=True)
         except ValueError as exc:
             st.warning(str(exc))
     with tab_top_100:
@@ -771,7 +905,7 @@ def main():
     with tab_top_50_ontario:
         render_top_50_ontario_tab(rankings)
     with tab_ai:
-        render_ai_analysis_tab(selected_player, player_df, rankings)
+        render_ai_analysis_val = render_ai_analysis_tab(selected_player, player_df, rankings)
     with tab_multi_download:
         render_multi_player_download_tab(rankings)
 

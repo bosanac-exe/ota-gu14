@@ -632,12 +632,29 @@ def chart_multi_player_metric(rankings: pd.DataFrame, players: List[str], metric
         st.info(f"No numeric data available for {metric} for the selected players.")
         return
     fig = px.line(chart_df, x="Week Label", y=metric, color="Player", markers=True, title=f"{metric} Comparison by Week", labels={"Week Label": "Week", metric: metric})
-    fig.update_layout(xaxis_title="Week", yaxis_title=metric, hovermode="x unified", title_x=0.5)
-    if metric in LOWER_IS_BETTER:
-        fig.update_yaxes(autorange="reversed")
+    annotations = []
+    for x_val, y_val in zip(chart_df["Week Label"], chart_df[metric]):
+        if "%" in metric:
+            text = f"{y_val:.0%}"
+        else:
+            text = f"{y_val}"
+        annotations.append(
+            dict(x=x_val, y=y_val, text=text, showarrow=False, yshift=10, font=dict(size=9))
+        )
+    fig.update_layout(
+        xaxis_title="Week",
+        yaxis_title=metric,
+        hovermode="x unified",
+        title_x=0.5,
+        margin=dict(t=80),
+        annotations=annotations,
+        showlegend=len(players) > 1,
+    )
     if "%" in metric:
         fig.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig, width="stretch")
+    if metric in LOWER_IS_BETTER:
+        fig.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def build_player_metric_figure(player_df: pd.DataFrame, metric: str):
@@ -646,17 +663,28 @@ def build_player_metric_figure(player_df: pd.DataFrame, metric: str):
     if chart_df.empty:
         return None
     figure = px.line(chart_df, x="Week Label", y=metric, markers=True, title=f"{metric} by week")
+    annotations = []
+    for x_val, y_val in zip(chart_df["Week Label"], chart_df[metric]):
+        if "%" in metric:
+            text = f"{y_val:.0%}"
+        else:
+            text = f"{y_val}"
+        annotations.append(
+            dict(x=x_val, y=y_val, text=text, showarrow=False, yshift=10, font=dict(size=9))
+        )
     figure.update_layout(
         title_x=0.5,
-        margin=dict(l=30, r=20, t=50, b=35),
-        height=260,
+        margin=dict(l=30, r=20, t=80, b=35),
+        height=300,
         xaxis_title="Week",
         yaxis_title=metric,
+        annotations=annotations,
+        showlegend=False,
     )
-    if metric in LOWER_IS_BETTER:
-        figure.update_yaxes(autorange="reversed")
     if "%" in metric:
         figure.update_yaxes(tickformat=".0%")
+    if metric in LOWER_IS_BETTER:
+        figure.update_yaxes(autorange="reversed")
     return figure
 
 
@@ -2637,6 +2665,14 @@ def main() -> None:
         st.error(f"Could not load workbook: {exc}")
         return
 
+    player_provinces = (
+        rankings.dropna(subset=["Province"])
+        .sort_values("Week Sort")
+        .drop_duplicates("Player", keep="last")
+        .set_index("Player")["Province"]
+    )
+    province_options = ["All"] + sorted(player_provinces.dropna().unique())
+    
     players = sorted(rankings["Player"].dropna().unique())
     if not players:
         st.error("No players were found in the weekly worksheets.")
@@ -2644,7 +2680,20 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Dashboard")
-        player_choice = st.selectbox("Player", [PLAYER_PLACEHOLDER, *players], index=0)
+        default_province_index = province_options.index("Ontario") if "Ontario" in province_options else 0
+        selected_province = st.selectbox("Province", province_options, index=default_province_index)
+        
+        if selected_province == "All":
+            filtered_players = players
+        else:
+            eligible_players = player_provinces[player_provinces == selected_province].index
+            filtered_players = sorted(rankings.loc[rankings["Player"].isin(eligible_players), "Player"].dropna().unique())
+        
+        if not filtered_players:
+            st.warning(f"No players found for province: {selected_province}")
+            filtered_players = players
+        
+        player_choice = st.selectbox("Player", [PLAYER_PLACEHOLDER, *filtered_players], index=0)
         section = st.selectbox("Section", list(VIEWS_BY_SECTION))
         view = st.radio("View", VIEWS_BY_SECTION[section])
         st.divider()

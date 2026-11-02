@@ -1081,7 +1081,6 @@ def apply_styles() -> None:
     st.markdown(
         """
         <style>
-        section[data-testid="stSidebar"] > div:first-child { padding-bottom: 13rem; }
         .player-header {
             border-bottom: 1px solid #d7dce3;
             padding: 0.15rem 0 0.9rem;
@@ -1427,19 +1426,17 @@ def apply_styles() -> None:
             text-decoration: underline;
         }
         .sidebar-data-status {
-            position: fixed;
-            bottom: 0.75rem;
-            left: 0.75rem;
-            width: 250px;
-            max-width: calc(100vw - 1.5rem);
+            position: static;
+            width: auto;
+            max-width: 100%;
             box-sizing: border-box;
             color: #6b7280;
             font-size: 0.76rem;
             line-height: 1.45;
             padding: 0.65rem 0.75rem;
+            margin-top: 1rem;
             border-top: 1px solid #d7dce3;
             background: var(--secondary-background-color);
-            z-index: 1000;
             overflow-wrap: anywhere;
         }
         .sidebar-data-status__title {
@@ -2648,7 +2645,7 @@ def render_view(view: str, rankings, players, selected_player: str | None, playe
 
 def main() -> None:
     apply_styles()
-    st.title("OTA Girls U12 Ranking Dashboard")
+    st.title("OTA Girls U14 Ranking Dashboard")
 
     if not backend.MASTER_WORKBOOK.exists():
         st.error(f"Could not find {backend.MASTER_WORKBOOK.name}. Place it beside app.py and rerun the app.")

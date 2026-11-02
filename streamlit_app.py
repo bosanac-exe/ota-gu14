@@ -1064,6 +1064,8 @@ VIEWS_BY_SECTION = {
 }
 UTR_LOOKUP_WORKBOOK = Path(__file__).with_name("list.xlsx")
 UTR_PROFILE_URL = "https://api.utrsports.net/v1/player/{player_id}/profile"
+
+
 H2H_BACKEND_URL = st.secrets.get("H2H_BACKEND_URL", "").rstrip("/")
 H2H_BACKEND_API_KEY = st.secrets.get("H2H_BACKEND_API_KEY", "")
 H2H_MATCH_HISTORY_URL = st.secrets.get(
@@ -1430,6 +1432,7 @@ def apply_styles() -> None:
             left: 0.75rem;
             width: 250px;
             max-width: calc(100vw - 1.5rem);
+            box-sizing: border-box;
             color: #6b7280;
             font-size: 0.76rem;
             line-height: 1.45;
@@ -1437,6 +1440,7 @@ def apply_styles() -> None:
             border-top: 1px solid #d7dce3;
             background: var(--secondary-background-color);
             z-index: 1000;
+            overflow-wrap: anywhere;
         }
         .sidebar-data-status__title {
             color: #4b5563;
@@ -1446,7 +1450,6 @@ def apply_styles() -> None:
         @media (max-width: 640px) {
             .player-header__name { font-size: 1.55rem; }
             .player-header__meta { line-height: 1.55; }
-            .sidebar-data-status { width: calc(100vw - 1.5rem); }
             .player-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .player-metric__value { font-size: 1.85rem; }
             .h2h-scoreband {
@@ -1703,14 +1706,6 @@ def fetch_common_competitors(left_id: str, right_id: str) -> tuple[dict | None, 
         return None, diagnostic
 
 
-def _invert_record(record: dict | None) -> dict:
-    """Flip a shared-opponent record so wins and losses read from the compared player's side."""
-    record = record or {}
-    wins = record.get("losses")
-    losses = record.get("wins")
-    return {**record, "wins": wins, "losses": losses}
-
-
 def _common_competitor_rows(response: dict) -> list[dict[str, object]]:
     """Convert common-opponent API data into display-ready rows."""
     competitors = (
@@ -1736,8 +1731,8 @@ def _common_competitor_rows(response: dict) -> list[dict[str, object]]:
             "id": str(competitor.get("id") or ""),
             "name": name or "Unavailable",
             "wtn": f"{float(single_wtn):.1f}" if isinstance(single_wtn, (int, float)) else "unavailable",
-            "p1": _invert_record(competitor.get("p1Vs")),
-            "p2": _invert_record(competitor.get("p2Vs")),
+            "p1": competitor.get("p1Vs") or {},
+            "p2": competitor.get("p2Vs") or {},
         })
     return rows
 
@@ -1872,10 +1867,11 @@ def render_h2h_view(players: list[str], selected_player: str, rankings: pd.DataF
                     with error_mid:
                         st.error("Unable to process the comparison.")
                 else:
-                    with st.spinner("Fetching match history..."):
-                        match_history, history_diagnostic = fetch_common_matches(left_id, right_id)
-                    with st.spinner("Fetching competitors in common..."):
-                        common_competitors, competitors_diagnostic = fetch_common_competitors(left_id, right_id)
+                    with spinner_mid:
+                        with st.spinner("Fetching match history..."):
+                            match_history, history_diagnostic = fetch_common_matches(left_id, right_id)
+                        with st.spinner("Fetching competitors in common..."):
+                            common_competitors, competitors_diagnostic = fetch_common_competitors(left_id, right_id)
                     st.session_state["h2h_left_player"] = left_player
                     st.session_state["h2h_right_player"] = right_player
                     st.session_state["h2h_result"] = {
@@ -2652,7 +2648,7 @@ def render_view(view: str, rankings, players, selected_player: str | None, playe
 
 def main() -> None:
     apply_styles()
-    st.title("OTA Girls U14 Ranking Dashboard")
+    st.title("OTA Girls U12 Ranking Dashboard")
 
     if not backend.MASTER_WORKBOOK.exists():
         st.error(f"Could not find {backend.MASTER_WORKBOOK.name}. Place it beside app.py and rerun the app.")
